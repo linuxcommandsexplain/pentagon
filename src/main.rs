@@ -2,6 +2,7 @@ mod commands;
 
 use std::{fs, io};
 use crate::commands::help::show_help;
+use crate::commands::port_scanner::launch_port_scanner;
 
 fn main() {
     let mut input = String::new();
@@ -19,6 +20,7 @@ fn main() {
             "test" => println!("this is test command"),
             "quit" => break,
             "help" => show_help(),
+            "ipscanner" => launch_port_scanner(),
             _ => println!("Uknown input"),
         }
     }
