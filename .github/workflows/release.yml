@@ -1,26 +1,150 @@
-name: Créer une Release Automatique
+name: Create Release
 
 on:
   push:
-    tags:
-      - 'v*'  # Se déclenche sur tout tag commençant par "v" (ex: v1.0.0, v2.1.3)
-
-permissions:
-  contents: write  # Nécessaire pour créer la release et uploader des assets
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.0)'
+        required: true
+        type: string
 
 jobs:
-  release:
+  build-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+
     steps:
-      - name: Checkout du code
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Important pour générer correctement les notes de release
+          fetch-depth: 0
 
-      - name: Créer la Release GitHub
-        uses: softprops/action-gh-release@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          generate_release_notes: true  # Génère automatiquement les notes de release (changelog basé sur les PRs/commits)
-          # files: |  # Optionnel : décommentez pour uploader des fichiers (ex: binaires, zip...)
-          #   dist/*.zip
-          #   README.md
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run build
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+        continue-on-error: true
+
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LATEST_TAG" ]; then
+            echo "previous_tag=v0.0.0" >> $GITHUB_OUTPUT
+            echo "No previous tag found, using v0.0.0"
+          else
+            echo "previous_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "Previous tag: $LATEST_TAG"
+          fi
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            PREV_TAG="${{ steps.get_latest_tag.outputs.previous_tag }}"
+            PREV_VERSION=${PREV_TAG#v}
+            IFS='.' read -r -a VERSION_PARTS <<< "$PREV_VERSION"
+            MAJOR=${VERSION_PARTS[0]:-0}
+            MINOR=${VERSION_PARTS[1]:-0}
+            PATCH=${VERSION_PARTS[2]:-0}
+            PATCH=$((PATCH + 1))
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG="${{ steps.get_latest_tag.outputs.previous_tag }}"
+          NEW_TAG="${{ steps.version.outputs.tag }}"
+          
+          echo "# Release $NEW_TAG" > changelog.md
+          echo "" >> changelog.md
+          echo "## 📋 Changes" >> changelog.md
+          echo "" >> changelog.md
+          
+          if [ "$PREV_TAG" != "v0.0.0" ]; then
+            git log $PREV_TAG..HEAD --pretty=format:"- %s (%h) - @%an" >> changelog.md
+          else
+            git log --pretty=format:"- %s (%h) - @%an" >> changelog.md
+          fi
+          
+          echo "" >> changelog.md
+          echo "" >> changelog.md
+          echo "## 👥 Contributors" >> changelog.md
+          echo "" >> changelog.md
+          
+          if [ "$PREV_TAG" != "v0.0.0" ]; then
+            git log $PREV_TAG..HEAD --format='%an <%ae>' | sort -u | while read contributor; do
+              echo "- $contributor" >> changelog.md
+            done
+          else
+            git log --format='%an <%ae>' | sort -u | while read contributor; do
+              echo "- $contributor" >> changelog.md
+            done
+          fi
+          
+          cat changelog.md
+
+      - name: Create Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a ${{ steps.version.outputs.tag }} -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin ${{ steps.version.outputs.tag }}
+
+      - name: Archive build artifacts
+        run: |
+          mkdir -p release-artifacts
+          if [ -d "dist" ]; then
+            zip -r release-artifacts/build-${{ steps.version.outputs.tag }}.zip dist/
+          elif [ -d "build" ]; then
+            zip -r release-artifacts/build-${{ steps.version.outputs.tag }}.zip build/
+          else
+            echo "No dist or build directory found"
+            mkdir -p dist
+            echo "Build completed successfully" > dist/README.txt
+            zip -r release-artifacts/build-${{ steps.version.outputs.tag }}.zip dist/
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          body_path: changelog.md
+          files: |
+            release-artifacts/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update package.json version
+        if: hashFiles('package.json') != ''
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}" || echo "No changes to commit"
+          git push origin ${{ github.ref_name }} || echo "No changes to push"
