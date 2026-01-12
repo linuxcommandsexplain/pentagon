@@ -14,10 +14,26 @@ on:
 
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
       pull-requests: read
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: windows-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: macos-arm64
 
     steps:
       - name: Checkout code
@@ -25,23 +41,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
         with:
-          node-version: '20'
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run build
-        run: npm run build
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run tests
-        run: npm test
-        continue-on-error: true
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Get latest tag
         id: get_latest_tag
+        shell: bash
         run: |
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LATEST_TAG" ]; then
@@ -50,6 +77,88 @@ jobs:
           else
             echo "previous_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
             echo "Previous tag: $LATEST_TAG"
+          fi
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            PREV_TAG="${{ steps.get_latest_tag.outputs.previous_tag }}"
+            PREV_VERSION=${PREV_TAG#v}
+            IFS='.' read -r -a VERSION_PARTS <<< "$PREV_VERSION"
+            MAJOR=${VERSION_PARTS[0]:-0}
+            MINOR=${VERSION_PARTS[1]:-0}
+            PATCH=${VERSION_PARTS[2]:-0}
+            PATCH=$((PATCH + 1))
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $VERSION"
+
+      - name: Run tests
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Get binary name
+        id: binary
+        shell: bash
+        run: |
+          BINARY_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name' | head -n 1)
+          echo "name=$BINARY_NAME" >> $GITHUB_OUTPUT
+          echo "Binary name: $BINARY_NAME"
+
+      - name: Package binary (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          BINARY_NAME="${{ steps.binary.outputs.name }}"
+          mkdir -p release-artifacts
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../release-artifacts/${BINARY_NAME}-${{ steps.version.outputs.tag }}-${{ matrix.artifact_name }}.tar.gz $BINARY_NAME
+          cd ../../..
+
+      - name: Package binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          BINARY_NAME="${{ steps.binary.outputs.name }}"
+          mkdir -p release-artifacts
+          cd target/${{ matrix.target }}/release
+          7z a ../../../release-artifacts/${BINARY_NAME}-${{ steps.version.outputs.tag }}-${{ matrix.artifact_name }}.zip ${BINARY_NAME}.exe
+          cd ../../..
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release-artifacts/*
+
+  create-release:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LATEST_TAG" ]; then
+            echo "previous_tag=v0.0.0" >> $GITHUB_OUTPUT
+          else
+            echo "previous_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           fi
 
       - name: Determine version
@@ -69,7 +178,6 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-          echo "New version: $VERSION"
 
       - name: Generate changelog
         id: changelog
@@ -77,15 +185,15 @@ jobs:
           PREV_TAG="${{ steps.get_latest_tag.outputs.previous_tag }}"
           NEW_TAG="${{ steps.version.outputs.tag }}"
           
-          echo "# Release $NEW_TAG" > changelog.md
+          echo "# 🚀 Release $NEW_TAG" > changelog.md
           echo "" >> changelog.md
           echo "## 📋 Changes" >> changelog.md
           echo "" >> changelog.md
           
           if [ "$PREV_TAG" != "v0.0.0" ]; then
-            git log $PREV_TAG..HEAD --pretty=format:"- %s (%h) - @%an" >> changelog.md
+            git log $PREV_TAG..HEAD --pretty=format:"- %s (\`%h\`) - @%an" >> changelog.md
           else
-            git log --pretty=format:"- %s (%h) - @%an" >> changelog.md
+            git log --pretty=format:"- %s (\`%h\`) - @%an" >> changelog.md
           fi
           
           echo "" >> changelog.md
@@ -103,6 +211,11 @@ jobs:
             done
           fi
           
+          echo "" >> changelog.md
+          echo "## 📦 Downloads" >> changelog.md
+          echo "" >> changelog.md
+          echo "Download the appropriate binary for your platform below." >> changelog.md
+          
           cat changelog.md
 
       - name: Create Git tag
@@ -112,19 +225,10 @@ jobs:
           git tag -a ${{ steps.version.outputs.tag }} -m "Release ${{ steps.version.outputs.tag }}"
           git push origin ${{ steps.version.outputs.tag }}
 
-      - name: Archive build artifacts
-        run: |
-          mkdir -p release-artifacts
-          if [ -d "dist" ]; then
-            zip -r release-artifacts/build-${{ steps.version.outputs.tag }}.zip dist/
-          elif [ -d "build" ]; then
-            zip -r release-artifacts/build-${{ steps.version.outputs.tag }}.zip build/
-          else
-            echo "No dist or build directory found"
-            mkdir -p dist
-            echo "Build completed successfully" > dist/README.txt
-            zip -r release-artifacts/build-${{ steps.version.outputs.tag }}.zip dist/
-          fi
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: release-artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -133,18 +237,17 @@ jobs:
           name: Release ${{ steps.version.outputs.tag }}
           body_path: changelog.md
           files: |
-            release-artifacts/*.zip
+            release-artifacts/**/*
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update package.json version
-        if: hashFiles('package.json') != ''
+      - name: Update Cargo.toml version
         run: |
-          npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
+          git add Cargo.toml
           git commit -m "chore: bump version to ${{ steps.version.outputs.version }}" || echo "No changes to commit"
           git push origin ${{ github.ref_name }} || echo "No changes to push"
