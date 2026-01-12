@@ -202,11 +202,11 @@ jobs:
           echo "" >> changelog.md
           
           if [ "$PREV_TAG" != "v0.0.0" ]; then
-            git log $PREV_TAG..HEAD --format='%an <%ae>' | sort -u | while read contributor; do
+            git log $PREV_TAG..HEAD --format='%an' | sort -u | while read contributor; do
               echo "- $contributor" >> changelog.md
             done
           else
-            git log --format='%an <%ae>' | sort -u | while read contributor; do
+            git log --format='%an' | sort -u | while read contributor; do
               echo "- $contributor" >> changelog.md
             done
           fi
