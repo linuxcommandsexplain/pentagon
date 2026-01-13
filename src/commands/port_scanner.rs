@@ -1,25 +1,81 @@
-use std::io;
-use std::net::TcpStream;
-use std::time::Duration;
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode};
+use ratatui::{
+    layout::{Constraint, Direction, Layout},
+    prelude::*,
+    widgets::{Paragraph},
+};
+use tui_textarea::{TextArea, Input};
 
-pub fn launch_port_scanner() {
-    let mut target_ip = String::new();
-    let mut target_port = String::new();
+pub fn launch_port_scanner() -> Result<()> {
+    let mut terminal = ratatui::init();
 
-    println!("Welcome to the port scanner!");
+    // Créer les deux textareas
+    let mut ip_area = TextArea::default();
+    ip_area.set_block(
+        ratatui::widgets::Block::bordered().title("IP Address")
+    );
 
-    println!("enter the target IP address: ");
-    io::stdin().read_line(&mut target_ip).unwrap();
+    let mut port_area = TextArea::default();
+    port_area.set_block(
+        ratatui::widgets::Block::bordered().title("Port")
+    );
 
-    println!("enter the target port to scan: ");
-    io::stdin().read_line(&mut target_port).unwrap();
+    // Lequel est actif (0 = IP, 1 = Port)
+    let mut active = 0;
 
-    let target = format!("{}:{}", target_ip.trim(), target_port.trim());
+    loop {
+        terminal.draw(|frame| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Titre
+                    Constraint::Length(3), // Champ IP
+                    Constraint::Length(3), // Champ Port
+                    Constraint::Min(1),    // Espace restant
+                ])
+                .split(frame.area());
 
-    println!("scanning {} on port {}", target_ip, target_port);
-    if (TcpStream::connect(&target)).is_ok() {
-        println!("successfully connected to {}", target);
-    } else {
-        println!("failed to connect to {}", target);
+            // Titre
+            let title = Paragraph::new("Pentagon IP Scanner")
+                .alignment(Alignment::Center)
+                .block(ratatui::widgets::Block::bordered());
+            frame.render_widget(title, chunks[0]);
+
+            // Champs de saisie
+            frame.render_widget(ip_area.widget(), chunks[1]);
+            frame.render_widget(port_area.widget(), chunks[2]);
+        })?;
+
+        // Gérer les événements
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Esc => break,
+                KeyCode::Tab => {
+                    // Changer de champ avec Tab
+                    active = if active == 0 { 1 } else { 0 };
+                }
+                KeyCode::Enter => {
+                    // Lancer le scan (à implémenter)
+                    break;
+                }
+                _ => {
+                    // Envoyer la touche au textarea actif
+                    if active == 0 {
+                        ip_area.input(Input::from(key));
+                    } else {
+                        port_area.input(Input::from(key));
+                    }
+                }
+            }
+        }
     }
+
+    ratatui::restore();
+
+    // Afficher ce qui a été saisi
+    println!("IP: {}", ip_area.lines().join(""));
+    println!("Port: {}", port_area.lines().join(""));
+
+    Ok(())
 }

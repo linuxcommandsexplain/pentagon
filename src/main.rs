@@ -1,7 +1,5 @@
 mod commands;
 
-use color_eyre::owo_colors::OwoColorize;
-use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     prelude::*,
@@ -9,12 +7,11 @@ use ratatui::{
 };
 use ratatui::widgets::{List, ListItem, ListState};
 
-fn main() -> Result<()> {
-    color_eyre::install()?;
+fn main() -> Result<(), Box<dyn std::error::Error>>  {
     let mut terminal = ratatui::init();
     let mut state = ListState::default();
     state.select(Some(0));
-    let items = vec!["Help", "Ip scanner"];
+    let items = vec!["Help", "IP scanner"];
 
     loop {
         terminal.draw(|mut f| {
@@ -58,6 +55,9 @@ fn main() -> Result<()> {
                         match items[index] {
                             "Help" => {
                                 commands::help::show_help();
+                            }
+                            "IP scanner" => {
+                                commands::port_scanner::launch_port_scanner().expect("TODO: panic message");
                             }
                             _ => {}
                         }
